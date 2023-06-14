@@ -1,0 +1,27 @@
+ApiInfo:
+  # 第三方平台ApiKey
+  apiKey: "apikey"
+
+StockInfo:
+  # 股市，例如北美股市
+  market: "北美股市"
+  # 股票名称，多个逗号分开，不指定则标识抓取本股市下的所有股票
+  ticker: "APP,GOOGLE"
+  # 开始日期
+  beginDate: "2023-01-15"
+  # 结束日期
+  endDate: "2023-05-05"
+  # 数据频率 例如5分钟、10分钟
+  frequency: "5Min"
+  # 股票所在时区
+  timeZone: "Asia/Shanghai"
+
+LogInfo:
+  # 日志文件路径
+  logFile: "log.txt"
+
+MongoInfo:
+  # MongoDB连接URL
+  mongoURL: "mongodb://localhost:27017"
+  # MongoDB数据库名称
+  mongoDB: "stock_data"
