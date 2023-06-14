@@ -1,6 +1,6 @@
 ApiInfo:
   # 第三方平台ApiKey
-  apiKey: "apikey"
+  apiKey: "A8e0FPkqfm5oaKJ_YDBPI_ZYMWMyS8y5"
 
 StockInfo:
   # 股市，例如北美股市
@@ -13,8 +13,8 @@ StockInfo:
   endDate: "2023-05-05"
   # 数据频率 例如5分钟、10分钟
   frequency: "5Min"
-  # 股票所在时区
-  timeZone: "Asia/Shanghai"
+  # 股票所在时区 Asia/Shanghai
+  timeZone: "America/New_York"
 
 LogInfo:
   # 日志文件路径
@@ -22,6 +22,6 @@ LogInfo:
 
 MongoInfo:
   # MongoDB连接URL
-  mongoURL: "mongodb://localhost:27017"
+  mongoURL: "mongodb://127.0.0.1:27017"
   # MongoDB数据库名称
   mongoDB: "stock_data"
