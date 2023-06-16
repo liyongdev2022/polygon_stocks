@@ -6,12 +6,17 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/go-co-op/gocron"
 	polygon "github.com/polygon-io/client-go/rest"
+	"github.com/polygon-io/client-go/rest/models"
 	"github.com/spf13/viper"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"log"
 	"os"
 	"polygon_stocks/config"
+	"strconv"
+	"strings"
+	"sync"
 
 	"time"
 )
@@ -21,6 +26,12 @@ var (
 	GlobalViper  *viper.Viper
 	GlobalConfig *config.Config
 )
+
+type StockData struct {
+	Market string    `json:"market"`
+	Ticker string    `json:"ticker"`
+	Time   time.Time `json:"time"`
+}
 
 // 初始化
 func init() {
@@ -53,7 +64,8 @@ func initConfig() {
 	fmt.Println("ticker==>", GlobalConfig.StockInfo.Ticker)
 	fmt.Println("beginDate==>", GlobalConfig.StockInfo.BeginDate)
 	fmt.Println("endDate==>", GlobalConfig.StockInfo.EndDate)
-	fmt.Println("frequency==>", GlobalConfig.StockInfo.Frequency)
+	fmt.Println("Multiplier==>", GlobalConfig.StockInfo.Multiplier)
+	fmt.Println("timespan==>", GlobalConfig.StockInfo.Timespan)
 	fmt.Println("timeZone==>", GlobalConfig.StockInfo.TimeZone)
 	fmt.Println("------------------------------------------------")
 	fmt.Println("logFile==>", GlobalConfig.LogInfo.LogFile)
@@ -78,7 +90,7 @@ func main() {
 
 	defer func() {
 		if err := recover(); err != nil {
-			Logger.Println("panic err:", err)
+			Logger.Fatalf("panic err:", err)
 		}
 	}()
 
@@ -89,15 +101,38 @@ func main() {
 	// 创建MongoDB客户端
 	mongo_client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(GlobalConfig.MongoInfo.MongoURL))
 	if err != nil {
-		Logger.Fatal(err)
+		Logger.Fatalf("create mongo client err:%v\n", err)
 	}
 	defer mongo_client.Disconnect(context.TODO())
 
 	// 创建Polygon客户端
 	polygon_client := polygon.New(GlobalConfig.ApiInfo.ApiKey)
 
+	// 获取股市开市闭市信息
+	marketStatus, err := getMarketStatus(polygon_client)
+	if err != nil {
+		Logger.Fatalf("get market status err:%v", err)
+	}
+
 	// 开始抓取数据
-	_ = polygon_client
+	var wg sync.WaitGroup
+	if len(GlobalConfig.StockInfo.Ticker) > 0 {
+		for _, ticker := range strings.Split(GlobalConfig.StockInfo.Ticker, ",") {
+			wg.Add(1)
+
+			go func(ticker string) {
+				defer wg.Done()
+				// 开始抓取
+				err = fetchData(context.TODO(), polygon_client, mongo_client, marketStatus, GlobalConfig.StockInfo.Market, ticker, GlobalConfig.StockInfo.BeginDate, GlobalConfig.StockInfo.EndDate, GlobalConfig.StockInfo.Multiplier, GlobalConfig.StockInfo.Timespan, GlobalConfig.StockInfo.TimeZone)
+				if err != nil {
+					Logger.Fatalf("Failed to fetch data for ticker %s: %v\n", ticker, err)
+				}
+			}(ticker)
+		}
+		wg.Wait()
+	} else {
+		fmt.Println("爬取当前股市的所有股票交易信息")
+	}
 
 	// 定时任务规则
 	timezone, _ := time.LoadLocation("Asia/Shanghai")
@@ -108,137 +143,72 @@ func main() {
 }
 
 // 抓取数据
-//func fetchData(ctx context.Context, market Market, stock Stock, beginDate, endDate time.Time) error {
-//	log.Printf("开始抓取股票数据: 市场=%s, 股票=%s\n", market.Name, stock.Ticker)
-//
-//	// 抓取股票市场的开市闭市信息
-//	marketInfo, err := fetchMarketInfo(market.Name)
-//	if err != nil {
-//		return fmt.Errorf("获取股市信息失败: %v", err)
-//	}
-//
-//	// 抓取股票交易信息
-//	for date := beginDate; date.Before(endDate); date = date.AddDate(0, 0, 1) {
-//		select {
-//		case <-ctx.Done():
-//			return ctx.Err()
-//		default:
-//			if date.Weekday() == time.Saturday || date.Weekday() == time.Sunday {
-//				continue // 跳过周末
-//			}
-//
-//			if !isTradingDay(date, marketInfo) {
-//				continue // 非交易日跳过
-//			}
-//
-//			// 构建API URL
-//			apiURL := fmt.Sprintf("%s/v2/aggs/ticker/%s/range/%d/minute/%s/%s?apiKey=%s",
-//				polygonBaseURL, stock.Ticker, market.Frequency,
-//				date.Format("2006-01-02"), date.AddDate(0, 0, 1).Format("2006-01-02"),
-//				polygonAPIKey)
-//
-//			// 发送HTTP请求获取数据
-//			response, errs := sendHTTPRequest(apiURL)
-//			if errs != nil {
-//				return fmt.Errorf("发送HTTP请求失败: %v", errs)
-//			}
-//
-//			// 解析响应数据
-//			data := gjson.Get(response, "results")
-//
-//			// 将数据保存到MongoDB
-//			err = saveDataToMongoDB(data, market.Collection)
-//			if err != nil {
-//				return fmt.Errorf("保存数据到MongoDB失败: %v", err)
-//			}
-//
-//			log.Printf("抓取数据成功: 市场=%s, 股票=%s, 日期=%s\n", market.Name, stock.Ticker, date.Format("2006-01-02"))
-//		}
-//	}
-//
-//	return nil
-//}
-//
-//// 抓取股票市场的开市闭市信息
-//func fetchMarketInfo(marketName string) (gjson.Result, error) {
-//	apiURL := fmt.Sprintf("%s/v3/reference/tickers?market=%s&active=true&apiKey=%s", polygonBaseURL, marketName, polygonAPIKey)
-//
-//	response, err := sendHTTPRequest(apiURL)
-//	if err != nil {
-//		return gjson.Result{}, err
-//	}
-//
-//	// 解析响应数据
-//	data := gjson.Get(response, "results")
-//
-//	// 返回第一个市场的信息
-//	return data.Get("0"), nil
-//}
+func fetchData(ctx context.Context, client *polygon.Client, mongoClient *mongo.Client, marketStatus *models.GetMarketStatusResponse, market, ticker, beginDateStr, endDateStr string, multiplier int, timespan, timezone string) error {
+	Logger.Printf("开始抓取股票数据: 市场=%s, 股票=%s\n", market, ticker)
 
-//
-//// 是否交易日
-//func isTradingDay(date time.Time, marketInfo gjson.Result) bool {
-//	marketOpenTime := marketInfo.Get("open").Int()
-//	marketCloseTime := marketInfo.Get("close").Int()
-//
-//	openTime := carbon.CreateFromTimestamp(marketOpenTime, marketInfo.Get("timezone").Str)
-//	closeTime := carbon.CreateFromTimestamp(marketCloseTime, marketInfo.Get("timezone").Str)
-//
-//	openTime = openTime.SetYear(date.Year())
-//	openTime = openTime.SetMonth(date.Month())
-//	openTime = openTime.SetDay(date.Day())
-//
-//	closeTime = closeTime.SetYear(date.Year())
-//	closeTime = closeTime.SetMonth(date.Month())
-//	closeTime = closeTime.SetDay(date.Day())
-//
-//	return date.After(openTime.Time) && date.Before(closeTime.Time)
-//}
-//
-//// 保存到mongoDB
-//func saveDataToMongoDB(data gjson.Result, collectionName string) error {
-//	client, err := mongo.NewClient(options.Client().ApplyURI("mongodb://localhost:27017"))
-//	if err != nil {
-//		return err
-//	}
-//	ctx := context.TODO()
-//	err = client.Connect(ctx)
-//	if err != nil {
-//		return err
-//	}
-//	defer client.Disconnect(ctx)
-//
-//	collection := client.Database("stockdata").Collection(collectionName)
-//
-//	// 处理每一条数据并保存到MongoDB
-//	for _, result := range data.Array() {
-//		item := result.Map()
-//
-//		// 格式化时间戳
-//		timestamp := item["t"].Int()
-//		item["timestamp"] = timestamp
-//		item["local_time"] = time.Unix(timestamp/1000, 0).Format("2006-01-02 15:04:05")
-//
-//		// 将数据插入MongoDB
-//		_, err = collection.InsertOne(ctx, item)
-//		if err != nil {
-//			return err
-//		}
-//	}
-//
-//	return nil
-//}
-//func sendHTTPRequest(url string) (string, error) {
-//	// 使用您选择的HTTP库发送GET请求并获取响应，示例中使用伪代码代替
-//	//response, err := sendGetRequest(url)
-//	//if err != nil {
-//	//	return "", err
-//	//}
-//	//
-//	//return response, nil
-//
-//	return "", nil
-//}
+	beginDate, _ := time.Parse("2006-01-02", beginDateStr)
+	endDate, _ := time.Parse("2006-01-02", endDateStr)
+
+	// 抓取股票交易信息
+	for date := beginDate; date.Before(endDate); date = date.AddDate(0, 0, 1) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			if date.Weekday() == time.Saturday || date.Weekday() == time.Sunday {
+				continue // 跳过周末
+			}
+
+			//if !isTradingDay(date, marketInfo) {
+			//	continue // 非交易日跳过
+			//}
+
+			params := models.ListAggsParams{
+				Ticker:     ticker,
+				Multiplier: multiplier,
+				Timespan:   models.Timespan(timespan),
+				From:       models.Millis(beginDate),
+				To:         models.Millis(endDate),
+			}.WithOrder(models.Desc).WithLimit(50000).WithAdjusted(true)
+
+			// make request
+			iter := client.ListAggs(context.Background(), params)
+
+			// do something with the result
+			for iter.Next() {
+				// 将数据保存到MongoDB
+				err := saveDataToMongoDB(iter.Item(), mongoClient, "stock_data_"+strconv.Itoa(multiplier)+timespan)
+				if err != nil {
+					return fmt.Errorf("保存数据到MongoDB失败: %v", err)
+				}
+			}
+			if iter.Err() != nil {
+				return fmt.Errorf("iter err:%v", iter.Err())
+			}
+
+			log.Printf("抓取数据成功: 市场=%s, 股票=%s, 日期=%s\n", market, ticker, date.Format("2006-01-02"))
+		}
+	}
+
+	return nil
+}
+func saveDataToMongoDB(data models.Agg, mongoClient *mongo.Client, collectionName string) error {
+
+	//collection := mongoClient.Database(GlobalConfig.MongoInfo.MongoDB).Collection(collectionName)
+
+	// 处理每一条数据并保存到MongoDB
+
+	return nil
+}
+
+// 获取股市开市闭市信息
+func getMarketStatus(client *polygon.Client) (*models.GetMarketStatusResponse, error) {
+	marketStatus, err := client.ReferenceClient.GetMarketStatus(context.Background(), models.RequestOption(func(o *models.RequestOptions) {}))
+	if err != nil {
+		return nil, err
+	}
+	return marketStatus, nil
+}
 
 // 初始化日志记录器
 func initLogger(logFile string) *log.Logger {
@@ -249,6 +219,45 @@ func initLogger(logFile string) *log.Logger {
 	defer file.Close()
 	loggers := log.New(file, "", log.LstdFlags)
 	return loggers
+}
+
+// 获取上次处理的时间
+func getLastProcessedTime(ctx context.Context, client *mongo.Client, market, ticker string) (time.Time, error) {
+	collection := client.Database("stock_data").Collection("last_processed_data")
+
+	filter := bson.M{"market": market, "ticker": ticker}
+	options := options.FindOne().SetSort(bson.M{"time": -1})
+
+	result := collection.FindOne(ctx, filter, options)
+	if result.Err() != nil {
+		if result.Err() == mongo.ErrNoDocuments {
+			return time.Time{}, nil // 没有找到记录，返回零时间
+		}
+		return time.Time{}, result.Err()
+	}
+
+	var data StockData
+	err := result.Decode(&data)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	return data.Time, nil
+}
+
+func updateLastProcessedTime(ctx context.Context, client *mongo.Client, market, ticker string, time time.Time) error {
+	collection := client.Database("stock_data").Collection("last_processed_data")
+
+	filter := bson.M{"market": market, "ticker": ticker}
+	update := bson.M{"$set": bson.M{"time": time.Unix()}}
+	options := options.Update().SetUpsert(true)
+
+	_, err := collection.UpdateOne(ctx, filter, update, options)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // 解析时区

@@ -4,15 +4,17 @@ ApiInfo:
 
 StockInfo:
   # 股市，例如北美股市
-  market: "北美股市"
+  market: "XNYS"
   # 股票名称，多个逗号分开，不指定则标识抓取本股市下的所有股票
-  ticker: "APP,GOOGLE"
+  ticker: "AAPL,MSFT"
   # 开始日期
   beginDate: "2023-01-15"
   # 结束日期
   endDate: "2023-05-03"
   # 数据频率 例如5分钟、10分钟
-  frequency1: "5Min"
+  multiplier: 5
+  # 数据频率单位
+  timespan: "minute"
   # 股票所在时区 Asia/Shanghai
   timeZone: "America/New_York"
 
