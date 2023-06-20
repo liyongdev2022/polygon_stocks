@@ -42,6 +42,7 @@ func init() {
 
 // 初始化配置文件
 func initConfig() {
+
 	GlobalViper = viper.New()
 	GlobalViper.SetConfigName("config") // 配置文件名称
 	GlobalViper.AddConfigPath(".")      // 从当前目录的哪个文件开始查找
@@ -103,7 +104,6 @@ func main() {
 	if err != nil {
 		Logger.Fatalf("create mongo client err:%v\n", err)
 	}
-	defer mongo_client.Disconnect(context.TODO())
 
 	// 创建Polygon客户端
 	polygon_client := polygon.New(GlobalConfig.ApiInfo.ApiKey)
@@ -119,7 +119,6 @@ func main() {
 	if len(GlobalConfig.StockInfo.Ticker) > 0 {
 		for _, ticker := range strings.Split(GlobalConfig.StockInfo.Ticker, ",") {
 			wg.Add(1)
-
 			go func(ticker string) {
 				defer wg.Done()
 				// 开始抓取
@@ -149,56 +148,114 @@ func fetchData(ctx context.Context, client *polygon.Client, mongoClient *mongo.C
 	beginDate, _ := time.Parse("2006-01-02", beginDateStr)
 	endDate, _ := time.Parse("2006-01-02", endDateStr)
 
+	activeCh := make(chan bool)
+
 	// 抓取股票交易信息
-	for date := beginDate; date.Before(endDate); date = date.AddDate(0, 0, 1) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			if date.Weekday() == time.Saturday || date.Weekday() == time.Sunday {
-				continue // 跳过周末
+	for date := beginDate; date.Before(endDate); {
+
+		// 获取日期当天股票详情信息
+		go func(activeCh chan bool) {
+			params := models.GetTickerDetailsParams{
+				Ticker: ticker,
+			}.WithDate(models.Date(date))
+			details, err := client.ReferenceClient.GetTickerDetails(context.TODO(), params)
+			if err != nil {
+				Logger.Printf("get ticker details err:%v\n", err)
+				return
+			}
+			if details != nil {
+				activeCh <- details.Results.Active
+			}
+			err = saveTickerDataToMongoDB(details, mongoClient, "stock_tickers_history")
+			if err != nil {
+				Logger.Printf("save stock ticker history data err:%v\n", err)
 			}
 
-			//if !isTradingDay(date, marketInfo) {
-			//	continue // 非交易日跳过
-			//}
+		}(activeCh)
 
-			params := models.ListAggsParams{
-				Ticker:     ticker,
-				Multiplier: multiplier,
-				Timespan:   models.Timespan(timespan),
-				From:       models.Millis(beginDate),
-				To:         models.Millis(endDate),
-			}.WithOrder(models.Desc).WithLimit(50000).WithAdjusted(true)
+		// 获取日期当天股票交易数据
+		go func(activeCh chan bool) {
+			for {
+				select {
+				case active := <-activeCh:
+					if active {
+						fmt.Printf("ticker:%s,data:%v,active:%v\n", ticker, date, active)
+						params := models.ListAggsParams{
+							Ticker:     ticker,
+							From:       models.Millis(beginDate),
+							To:         models.Millis(endDate),
+							Multiplier: multiplier,
+							Timespan:   models.Timespan(timespan),
+						}.WithOrder(models.Desc).WithAdjusted(true).WithLimit(50000)
 
-			// make request
-			iter := client.ListAggs(context.Background(), params)
+						iter := client.ListAggs(context.Background(), params)
+						for iter.Next() {
+							log.Print(iter.Item())
+							err := saveDataToMongoDB(iter.Item(), ticker, mongoClient, "stock_data_"+strconv.Itoa(multiplier)+timespan)
+							if err != nil {
+								Logger.Printf("save ticker details data err:%v\n", err)
+							}
+						}
+						if iter.Err() != nil {
+							log.Fatal(iter.Err())
+						}
 
-			// do something with the result
-			for iter.Next() {
-				// 将数据保存到MongoDB
-				err := saveDataToMongoDB(iter.Item(), mongoClient, "stock_data_"+strconv.Itoa(multiplier)+timespan)
-				if err != nil {
-					return fmt.Errorf("保存数据到MongoDB失败: %v", err)
+					}
 				}
 			}
-			if iter.Err() != nil {
-				return fmt.Errorf("iter err:%v", iter.Err())
-			}
 
-			log.Printf("抓取数据成功: 市场=%s, 股票=%s, 日期=%s\n", market, ticker, date.Format("2006-01-02"))
-		}
+		}(activeCh)
+
+		date = date.AddDate(0, 0, 1)
 	}
 
 	return nil
 }
-func saveDataToMongoDB(data models.Agg, mongoClient *mongo.Client, collectionName string) error {
+func saveDataToMongoDB(data models.Agg, ticker string, mongoClient *mongo.Client, collectionName string) error {
+	collection := mongoClient.Database(GlobalConfig.MongoInfo.MongoDB).Collection(collectionName)
+	//ts, err := data.Timestamp.MarshalJSON()
+	//if err != nil {
+	//	fmt.Println("ts marshal errs==>", err)
+	//	return err
+	//}
+	//fmt.Println("ts==>", string(ts))
+	//
+	//fmt.Println("now==>", time.Now())
+	//fmt.Println("utc==>", time.Now().UTC())
+	//location, _ := time.LoadLocation(GlobalConfig.StockInfo.TimeZone)
+	//
+	//fmt.Println("am===>", time.Now().UTC().In(location))
 
-	//collection := mongoClient.Database(GlobalConfig.MongoInfo.MongoDB).Collection(collectionName)
+	_, err := collection.InsertOne(context.TODO(), bson.M{
+		"ticker":          data.Ticker,
+		"timestamp":       data.Timestamp,
+		"open":            data.Open,
+		"high":            data.High,
+		"low":             data.Low,
+		"close":           data.Close,
+		"volume":          data.Volume,
+		"volume_weighted": data.VWAP,
+		"trade_date":      "",
+	})
+	return err
+}
 
-	// 处理每一条数据并保存到MongoDB
+func saveTickerDataToMongoDB(data *models.GetTickerDetailsResponse, mongoClient *mongo.Client, collectionName string) error {
+	collection := mongoClient.Database(GlobalConfig.MongoInfo.MongoDB).Collection(collectionName)
+	_, err := collection.InsertOne(context.TODO(), bson.M{
+		"ticker":           data.Results.Ticker,
+		"company_name":     data.Results.Name,
+		"primary_exchange": data.Results.PrimaryExchange,
+		"active":           data.Results.Active,
+		"last_updated_utc": data.Results.LastUpdatedUTC,
+		"currency_name":    data.Results.CurrencyName,
+		"locale":           data.Results.Locale,
+		"cik":              data.Results.CIK,
+		"composite_figi":   data.Results.CompositeFIGI,
+		"share_class_figi": data.Results.ShareClassFIGI,
+	})
 
-	return nil
+	return err
 }
 
 // 获取股市开市闭市信息
@@ -260,17 +317,33 @@ func updateLastProcessedTime(ctx context.Context, client *mongo.Client, market, 
 	return nil
 }
 
+func convertTimezone(timestamp int64, timezone string) (time.Time, error) {
+	// 创建一个时间对象，使用给定的时间戳和 UTC 时区
+	utcTime := time.Unix(timestamp, 0).UTC()
+
+	// 解析指定的时区
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	// 将时间对象转换为指定时区
+	timeInZone := utcTime.In(loc)
+
+	return timeInZone, nil
+}
+
 // 解析时区
 func parseTime(timeStr, timeZone string) time.Time {
 	loc, err := time.LoadLocation(timeZone)
 	if err != nil {
-		Logger.Fatalf("加载时区失败: %v\n", err)
+		fmt.Printf("加载时区失败: %v\n", err)
 	}
 
 	currentTime := time.Now().In(loc)
-	parsedTime, err := time.ParseInLocation("15:04", timeStr, currentTime.Location())
+	parsedTime, err := time.ParseInLocation("2006-01-02 15:04:05", timeStr, currentTime.Location())
 	if err != nil {
-		Logger.Fatalf("解析时间失败: %v\n", err)
+		fmt.Printf("解析时间失败: %v\n", err)
 	}
 
 	return parsedTime

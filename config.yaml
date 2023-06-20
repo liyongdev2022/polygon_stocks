@@ -10,7 +10,7 @@ StockInfo:
   # 开始日期
   beginDate: "2023-01-15"
   # 结束日期
-  endDate: "2023-05-03"
+  endDate: "2023-01-20"
   # 数据频率 例如5分钟、10分钟
   multiplier: 5
   # 数据频率单位
