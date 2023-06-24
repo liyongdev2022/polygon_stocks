@@ -6,9 +6,9 @@ StockInfo:
   # 股市，例如北美股市
   market: "XNYS"
   # 股票名称，多个逗号分开，不指定则标识抓取本股市下的所有股票
-  ticker: "AAPL,MSFT"
+  ticker: "AAPL"
   # 开始日期
-  beginDate: "2023-01-15"
+  beginDate: "2023-01-17"
   # 结束日期
   endDate: "2023-01-20"
   # 数据频率 例如5分钟、10分钟

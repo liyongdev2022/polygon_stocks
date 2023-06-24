@@ -1,3 +1,5 @@
+# 配置文件
+```yaml
 # polygon_stocks
 爬取股票历史数据
 ApiInfo:
@@ -41,3 +43,9 @@ MongoInfo:
 mongoURL: "mongodb://127.0.0.1:27017"
 # MongoDB数据库名称
 mongoDB: "stock_data"
+```
+# MongoDB 启动命令
+``` bash
+mongod --dbpath=/usr/local/mongodb/data --logpath=/usr/local/mongodb/log/log.log --fork
+
+```

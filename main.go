@@ -8,6 +8,7 @@ import (
 	polygon "github.com/polygon-io/client-go/rest"
 	"github.com/polygon-io/client-go/rest/models"
 	"github.com/spf13/viper"
+	"github.com/vito-go/mcache"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -17,7 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-
 	"time"
 )
 
@@ -53,20 +53,20 @@ func initConfig() {
 	if err != nil {
 		panic(fmt.Errorf("viper unmarshal yaml err:%v", err.Error()))
 	}
-	fmt.Println("apiKey==>", GlobalConfig.ApiInfo.ApiKey)
-	fmt.Println("------------------------------------------------")
-	fmt.Println("market==>", GlobalConfig.StockInfo.Market)
-	fmt.Println("ticker==>", GlobalConfig.StockInfo.Ticker)
-	fmt.Println("beginDate==>", GlobalConfig.StockInfo.BeginDate)
-	fmt.Println("endDate==>", GlobalConfig.StockInfo.EndDate)
-	fmt.Println("Multiplier==>", GlobalConfig.StockInfo.Multiplier)
-	fmt.Println("timespan==>", GlobalConfig.StockInfo.Timespan)
-	fmt.Println("timeZone==>", GlobalConfig.StockInfo.TimeZone)
-	fmt.Println("------------------------------------------------")
-	fmt.Println("logFile==>", GlobalConfig.LogInfo.LogFile)
-	fmt.Println("------------------------------------------------")
-	fmt.Println("mongoURL==>", GlobalConfig.MongoInfo.MongoURL)
-	fmt.Println("mongoDB==>", GlobalConfig.MongoInfo.MongoDB)
+	//fmt.Println("apiKey==>", GlobalConfig.ApiInfo.ApiKey)
+	//fmt.Println("------------------------------------------------")
+	//fmt.Println("market==>", GlobalConfig.StockInfo.Market)
+	//fmt.Println("ticker==>", GlobalConfig.StockInfo.Ticker)
+	//fmt.Println("beginDate==>", GlobalConfig.StockInfo.BeginDate)
+	//fmt.Println("endDate==>", GlobalConfig.StockInfo.EndDate)
+	//fmt.Println("Multiplier==>", GlobalConfig.StockInfo.Multiplier)
+	//fmt.Println("timespan==>", GlobalConfig.StockInfo.Timespan)
+	//fmt.Println("timeZone==>", GlobalConfig.StockInfo.TimeZone)
+	//fmt.Println("------------------------------------------------")
+	//fmt.Println("logFile==>", GlobalConfig.LogInfo.LogFile)
+	//fmt.Println("------------------------------------------------")
+	//fmt.Println("mongoURL==>", GlobalConfig.MongoInfo.MongoURL)
+	//fmt.Println("mongoDB==>", GlobalConfig.MongoInfo.MongoDB)
 
 }
 
@@ -100,6 +100,25 @@ func main() {
 
 	// 创建Polygon客户端
 	polygon_client := polygon.New(GlobalConfig.ApiInfo.ApiKey)
+
+	date, _ := time.Parse("2006-01-02", GlobalConfig.StockInfo.BeginDate)
+	fmt.Println("newDate==>", date)
+	params := models.ListAggsParams{
+		Ticker:     GlobalConfig.StockInfo.Ticker,
+		Multiplier: GlobalConfig.StockInfo.Multiplier,
+		Timespan:   models.Timespan(GlobalConfig.StockInfo.Timespan),
+		From:       models.Millis(time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)),
+		To:         models.Millis(time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)),
+	}.WithOrder(models.Desc).WithLimit(50000).WithAdjusted(true)
+
+	iter := polygon_client.ListAggs(context.Background(), params)
+	for iter.Next() {
+		log.Print(iter.Item())
+	}
+	if iter.Err() != nil {
+		log.Fatal(iter.Err())
+	}
+	return
 
 	// 开始抓取数据
 	var wg sync.WaitGroup
@@ -135,71 +154,74 @@ func fetchData(client *polygon.Client, mongoClient *mongo.Client, market, ticker
 	beginDate, _ := time.Parse("2006-01-02", beginDateStr)
 	endDate, _ := time.Parse("2006-01-02", endDateStr)
 
-	activeCh := make(chan bool)
-	var wg sync.WaitGroup
+	activeCh := make(chan bool, 1)
+	finshCh := make(chan bool, 1)
 	// 抓取股票交易信息
-	for date := beginDate; date.Before(endDate); {
-		wg.Add(2)
+	for date := beginDate; date.Before(endDate) || date.Equal(endDate); date = date.AddDate(0, 0, 1) {
 		// 获取日期当天股票详情信息
-		go func(activeCh chan bool, newDate time.Time) {
-			defer wg.Done()
+		go func(cha chan<- bool) {
 			params := models.GetTickerDetailsParams{
 				Ticker: ticker,
-			}.WithDate(models.Date(newDate))
-			details, err := client.ReferenceClient.GetTickerDetails(context.TODO(), params)
+			}.WithDate(models.Date(time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)))
+			details, err := client.ReferenceClient.GetTickerDetails(context.Background(), params)
 			if err != nil {
 				Logger.Printf("get ticker details err:%v\n", err)
 				return
-			}
-			if details != nil {
-				activeCh <- details.Results.Active
 			}
 			err = saveTickerDataToMongoDB(details, mongoClient, "stock_tickers_history")
 			if err != nil {
 				Logger.Printf("save stock ticker history data err:%v\n", err)
 			}
-
-		}(activeCh, date)
-
-		// 获取日期当天股票交易数据
-		go func(activeCh chan bool, newDate time.Time) {
-			defer wg.Done()
-			for {
-				select {
-				case active := <-activeCh:
-					if active {
-						//fmt.Printf("ticker:%s,data:%v,active:%v\n", ticker, date, active)
-						params := models.ListAggsParams{
-							Ticker:     ticker,
-							From:       models.Millis(beginDate),
-							To:         models.Millis(endDate),
-							Multiplier: multiplier,
-							Timespan:   models.Timespan(timespan),
-						}.WithOrder(models.Desc).WithAdjusted(true).WithLimit(50000)
-
-						iter := client.ListAggs(context.Background(), params)
-						for iter.Next() {
-							err := saveDataToMongoDB(iter.Item(), ticker, mongoClient, "stock_data_"+strconv.Itoa(multiplier)+timespan)
-							if err != nil {
-								Logger.Printf("save ticker details data err:%v\n", err)
-							}
-						}
-						if iter.Err() != nil {
-							log.Fatal(iter.Err())
-						}
-
-					}
-				}
+			if details != nil {
+				cha <- details.Results.Active
 			}
 
-		}(activeCh, date)
+		}(activeCh)
+		fmt.Println("wait.....", date.Format("2006-01-02"))
+		fmt.Println("历史交易->执行完了")
 
-		date = date.AddDate(0, 0, 1)
+		if <-activeCh {
+			go func(chf chan<- bool) {
+				params := models.ListAggsParams{
+					Ticker:     ticker,
+					Multiplier: multiplier,
+					Timespan:   models.Timespan(timespan),
+					From:       models.Millis(time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)),
+					To:         models.Millis(time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)),
+				}.WithOrder(models.Desc).WithLimit(50000).WithAdjusted(true)
+
+				iter := client.ListAggs(context.Background(), params)
+				for iter.Next() {
+					log.Print(iter.Item())
+				}
+				if iter.Err() != nil {
+					log.Fatal(iter.Err())
+				}
+				chf <- true
+
+			}(finshCh)
+		}
+
+		<-finshCh
+
+		fmt.Println("股票交易->执行完了")
+
 	}
-	wg.Wait()
 
 	return nil
 }
+
+// 删除抓取不完整的数据
+func deleteDataForMongoDB(ticker string, date string, mongoClient *mongo.Client, collectionName string) error {
+	collection := mongoClient.Database(GlobalConfig.MongoInfo.MongoDB).Collection(collectionName)
+	_, err := collection.DeleteMany(context.TODO(), bson.D{{"ticker", ticker}, {"trade_date", date}})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// 保存股票交易信息
 func saveDataToMongoDB(data models.Agg, ticker string, mongoClient *mongo.Client, collectionName string) error {
 	collection := mongoClient.Database(GlobalConfig.MongoInfo.MongoDB).Collection(collectionName)
 	ts, err := data.Timestamp.MarshalJSON()
@@ -228,6 +250,7 @@ func saveDataToMongoDB(data models.Agg, ticker string, mongoClient *mongo.Client
 	return err
 }
 
+// 保存股票历史交易信息
 func saveTickerDataToMongoDB(data *models.GetTickerDetailsResponse, mongoClient *mongo.Client, collectionName string) error {
 	collection := mongoClient.Database(GlobalConfig.MongoInfo.MongoDB).Collection(collectionName)
 	_, err := collection.InsertOne(context.TODO(), bson.M{
@@ -286,4 +309,24 @@ func parseTime(timeStr, timeZone string) time.Time {
 	}
 
 	return parsedTime
+}
+
+// 设置本地缓存
+func setLocalCache(ticker string, key string, value string) error {
+	c, err := mcache.NewMcache(ticker)
+	if err != nil {
+		return err
+	}
+	err = c.Set(key, []byte(value))
+	return err
+
+}
+
+// 获取本地缓存
+func getLocalCache(ticker string, key string) (string, error) {
+	c, err := mcache.NewMcache(ticker)
+	if err != nil {
+		return "", err
+	}
+	return string(c.Get(key)), nil
 }
